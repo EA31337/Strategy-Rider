@@ -54,6 +54,7 @@ class Stg_Rider : public Strategy {
  protected:
   // Stg_Rider_Params_Defaults ssparams;
   Trade strade;
+  float pricestop_value;
 
  public:
   Stg_Rider(StgParams &_sparams, TradeParams &_tparams, ChartParams &_cparams, string _name = "")
@@ -104,6 +105,7 @@ class Stg_Rider : public Strategy {
   virtual void OnPeriod(unsigned int _periods = DATETIME_NONE) {
     if ((_periods & DATETIME_MINUTE) != 0) {
       // New minute started.
+      pricestop_value = 0;
     }
     if ((_periods & DATETIME_HOUR) != 0) {
       // New hour started.
@@ -111,11 +113,9 @@ class Stg_Rider : public Strategy {
     }
     if ((_periods & DATETIME_DAY) != 0) {
       // New day started.
-      /*
       DictStruct<long, Ref<Order>> _orders_active = strade.GetOrdersActive();
       _orders_active.Clear();
       OrdersLoadByMagic();
-      */
     }
   }
 
@@ -160,7 +160,8 @@ class Stg_Rider : public Strategy {
    */
   virtual float PriceStop(ENUM_ORDER_TYPE _cmd, ENUM_ORDER_TYPE_VALUE _mode, int _method = 0, float _level = 0.0f,
                           short _bars = 4) {
-    return Strategy::PriceStop(_cmd, _mode, _method, _level, _bars);
+    // return Strategy::PriceStop(_cmd, _mode, _method, _level, _bars);
+    return pricestop_value;
   }
 
   /**
