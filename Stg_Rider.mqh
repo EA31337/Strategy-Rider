@@ -72,6 +72,74 @@ class Stg_Rider : public Strategy {
   }
 
   /**
+   * Calculates price stop values for orders.
+   *
+   * It's estimating a single price at which the account equity drops to zero,
+   * assuming all active order's stop losses are set to that price.
+   */
+  float CalcPriceStop() {
+    double balance = trade.account.GetBalance();
+    double equity = trade.account.GetEquity();  // Or use balance as starting point
+    double totalBuyLots = 0.0, totalSellLots = 0.0;
+    double buyOpenSum = 0.0, sellOpenSum = 0.0;
+    string symbol = trade.GetChart().GetSymbol();
+
+    double tickValue = SymbolInfoStatic::SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+    double tickSize = SymbolInfoStatic::SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+    float _pricestop_value = 0;
+
+    // Traverse active orders.
+    DictStruct<long, Ref<Order>> *orders = strade.GetOrdersActive();
+    for (DictStructIterator<long, Ref<Order>> iter = orders.Begin(); iter.IsValid(); ++iter) {
+      Ref<Order> refOrder = iter.Value();
+      Order *order = refOrder.Ptr();
+      if (!order.IsOpen()) continue;
+
+      double lots = order.Get<float>(ORDER_VOLUME_CURRENT);  // order.GetVolume(); // @todo: Returns 0.
+      double openPrice = order.GetOpenPrice();
+      ENUM_ORDER_TYPE type = order.GetType();
+
+      if (type == ORDER_TYPE_BUY) {
+        totalBuyLots += lots;
+        buyOpenSum += lots * openPrice;
+      } else if (type == ORDER_TYPE_SELL) {
+        totalSellLots += lots;
+        sellOpenSum += lots * openPrice;
+      }
+    }
+
+    // Weighted average open prices
+    double buyAvgOpen = totalBuyLots > 0 ? buyOpenSum / totalBuyLots : 0.0;
+    double sellAvgOpen = totalSellLots > 0 ? sellOpenSum / totalSellLots : 0.0;
+
+    // Equation: balance + (floating profit at price X) == 0
+    // For all BUY: profit = (X - OpenPrice) * Lots / TickSize * TickValue
+    // For all SELL: profit = (OpenPrice - X) * Lots / TickSize * TickValue
+
+    // Simplify:
+    // 0 = balance + (X - buyAvgOpen) * totalBuyLots / tickSize * tickValue
+    //             + (sellAvgOpen - X) * totalSellLots / tickSize * tickValue
+
+    // Combine:
+    // 0 = balance + tickValue / tickSize * [totalBuyLots * (X - buyAvgOpen) + totalSellLots * (sellAvgOpen - X)]
+    // 0 = balance + tickValue / tickSize * (X * (totalBuyLots - totalSellLots) - (buyAvgOpen * totalBuyLots -
+    // sellAvgOpen * totalSellLots)) Solve for X:
+
+    double lotsDiff = totalBuyLots - totalSellLots;
+    double A = tickValue / tickSize * lotsDiff;
+    double B = tickValue / tickSize * (buyAvgOpen * totalBuyLots - sellAvgOpen * totalSellLots);
+
+    if (MathAbs(A) > 1e-8) {
+      // _pricestop_value = (float)(( -balance + B ) / A);
+      _pricestop_value = (float)(buyAvgOpen - balance / ((tickValue / tickSize) * totalBuyLots));
+    } else {
+      _pricestop_value = 0.0f;  // Flat or no positions
+    }
+
+    return _pricestop_value;
+  }
+
+  /**
    * Checks if the current price is in trend given the order type.
    */
   bool IsTrend(ENUM_ORDER_TYPE _cmd, ENUM_TIMEFRAMES _tf = PERIOD_D1, int _shift = 0) {
@@ -97,6 +165,19 @@ class Stg_Rider : public Strategy {
     IndiRSIParams _indi_params(::Rider_Indi_RSI_Period, ::Rider_Indi_RSI_Applied_Price, ::Rider_Indi_RSI_Shift);
     _indi_params.SetTf(Get<ENUM_TIMEFRAMES>(STRAT_PARAM_TF));
     SetIndicator(new Indi_RSI(_indi_params));
+
+    DictStruct<long, Ref<Order>> _orders_active = strade.GetOrdersActive();
+    _orders_active.Clear();
+    OrdersLoadByMagic();
+  }
+
+  /**
+   * Event on strategy's order open.
+   */
+  virtual void OnOrderOpen(OrderParams &_oparams) {
+    Strategy::OnOrderOpen(_oparams);
+    // trade.orders_active.Set(_order.Get<ulong>(ORDER_PROP_TICKET), _ref_order);
+    // @todo: We need OnOrderOpen after order is opened.
   }
 
   /**
@@ -105,17 +186,20 @@ class Stg_Rider : public Strategy {
   virtual void OnPeriod(unsigned int _periods = DATETIME_NONE) {
     if ((_periods & DATETIME_MINUTE) != 0) {
       // New minute started.
-      pricestop_value = 0;
-    }
-    if ((_periods & DATETIME_HOUR) != 0) {
-      // New hour started.
-      OrdersLoadByMagic();
-    }
-    if ((_periods & DATETIME_DAY) != 0) {
-      // New day started.
       DictStruct<long, Ref<Order>> _orders_active = strade.GetOrdersActive();
       _orders_active.Clear();
       OrdersLoadByMagic();
+      // strade.RefreshActiveOrders(true, true);
+      strade.UpdateStates();
+      if (strade.Get<bool>(TRADE_STATE_ORDERS_ACTIVE)) {
+        pricestop_value = CalcPriceStop();
+      }
+    }
+    if ((_periods & DATETIME_HOUR) != 0) {
+      // New hour started.
+    }
+    if ((_periods & DATETIME_DAY) != 0) {
+      // New day started.
     }
   }
 
@@ -123,7 +207,6 @@ class Stg_Rider : public Strategy {
    * Loads active orders by magic number.
    */
   bool OrdersLoadByMagic() {
-    double _opricemax = 0.0, _opricemin = DBL_MAX;
     ResetLastError();
     int _total_active = TradeStatic::TotalActive();
     unsigned long _magic_no = Get<long>(STRAT_PARAM_ID);  // strade.Get<long>(TRADE_PARAM_MAGIC_NO);
@@ -135,22 +218,16 @@ class Stg_Rider : public Strategy {
           unsigned long _ticket = OrderStatic::Ticket();
           if (!_orders_active.KeyExists(_ticket)) {
             Ref<Order> _order = new Order(_ticket);
-            double _order_price_open = _order.Ptr().Get<float>(ORDER_PROP_PRICE_OPEN);
-            if (_order_price_open > _opricemax) {
-              _opricemax = _order_price_open;
-            } else if (_order_price_open < _opricemin) {
-              _opricemin = _order_price_open;
+            _order.Ptr().Refresh(ORDER_VOLUME_CURRENT);
+            if (_order.Ptr().Get<float>(ORDER_VOLUME_CURRENT) <= 0.0f) {
+              // @fixme
+              _order.Ptr().Set(ORDER_VOLUME_CURRENT, strade.GetChart().GetVolumeMin());
+              ResetLastError();
             }
             _orders_active.Set(_ticket, _order);
           }
         }
       }
-    }
-    if (_opricemax != 0.0) {
-      // ssparams.SetPriceMax(_opricemax);
-    }
-    if (_opricemin != 0.0) {
-      // ssparams.SetPriceMin(_opricemin);
     }
     return GetLastError() == ERR_NO_ERROR;
   }
