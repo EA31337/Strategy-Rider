@@ -29,7 +29,7 @@ jobs:
     strategy:
       matrix:
         file:
-          - Stg_Demo
+          - Stg_Rider
         year: [2022, 2024]
         version: [5]
     steps:
