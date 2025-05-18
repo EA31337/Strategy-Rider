@@ -6,8 +6,8 @@
 // User input params.
 INPUT_GROUP("Rider strategy: strategy params");
 INPUT float Rider_LotSize = 0;                 // Lot size
-INPUT int Rider_SignalOpenMethod = 0;          // Signal open method
-INPUT float Rider_SignalOpenLevel = 0;         // Signal open level
+INPUT int Rider_SignalOpenMethod = 19;         // Signal open method
+INPUT float Rider_SignalOpenLevel = 0;         // Signal open level (not in use)
 INPUT int Rider_SignalOpenFilterMethod = 322;  // Signal open filter method
 INPUT int Rider_SignalOpenFilterTime = 3;      // Signal open filter time (0-31)
 INPUT int Rider_SignalOpenBoostMethod = 0;     // Signal open boost method
@@ -16,20 +16,24 @@ INPUT int Rider_SignalCloseFilter = 0;         // Signal close filter (-127-127)
 INPUT float Rider_SignalCloseLevel = 0;        // Signal close level
 INPUT int Rider_PriceStopMethod = 0;           // Price limit method
 INPUT float Rider_PriceStopLevel = 0;          // Price limit level
-INPUT int Rider_TickFilterMethod = 4;          // Tick filter method (0-255)
+INPUT int Rider_TickFilterMethod = 14;         // Tick filter method (0-255)
 INPUT float Rider_MaxSpread = 4.0;             // Max spread to trade (in pips)
 INPUT short Rider_Shift = 0;                   // Shift
-INPUT float Rider_OrderCloseLoss = 80;         // Order close loss
-INPUT float Rider_OrderCloseProfit = 0;        // Order close profit
+INPUT float Rider_OrderCloseLoss = 320;        // Order close loss
+INPUT float Rider_OrderCloseProfit = 800;      // Order close profit
 INPUT int Rider_OrderCloseTime = 0;            // Order close time in mins (>0) or bars (<0)
 INPUT_GROUP("Rider strategy: Rider custom params");
 INPUT ENUM_PP_TYPE Rider_Trend_Pivot_Type = PP_TOM_DEMARK;  // Pivot type for trend calculation
-INPUT ENUM_TIMEFRAMES Rider_Trend_Tf = PERIOD_M30;          // Trend timeframe calculation
+INPUT ENUM_TIMEFRAMES Rider_Trend_Tf = PERIOD_M15;          // Trend timeframe calculation
 INPUT float Rider_Trend_Threshold = 0.3f;                   // Trend treshold
-INPUT_GROUP("Rider strategy: Rider indicator params");
+INPUT_GROUP("Rider strategy: Pattern indicator params");
+INPUT int Rider_Indi_Pattern_Shift = 1;  // Shift
+INPUT_GROUP("Rider strategy: RSI indicator params");
 INPUT int Rider_Indi_RSI_Period = 16;                                    // Period
 INPUT ENUM_APPLIED_PRICE Rider_Indi_RSI_Applied_Price = PRICE_WEIGHTED;  // Applied Price
 INPUT int Rider_Indi_RSI_Shift = 0;                                      // Shift
+INPUT_GROUP("Rider strategy: Volumes indicator params");
+INPUT int Rider_Indi_Volumes_Shift = 1;  // Shift
 
 // Structs.
 
@@ -172,9 +176,17 @@ class Stg_Rider : public Strategy {
    */
   void OnInit() {
     // Initialize indicators.
-    IndiRSIParams _indi_params(::Rider_Indi_RSI_Period, ::Rider_Indi_RSI_Applied_Price, ::Rider_Indi_RSI_Shift);
-    _indi_params.SetTf(Get<ENUM_TIMEFRAMES>(STRAT_PARAM_TF));
-    SetIndicator(new Indi_RSI(_indi_params));
+    IndiRSIParams _indi_rsi_params(::Rider_Indi_RSI_Period, ::Rider_Indi_RSI_Applied_Price, ::Rider_Indi_RSI_Shift);
+    _indi_rsi_params.SetTf(Get<ENUM_TIMEFRAMES>(STRAT_PARAM_TF));
+    SetIndicator(new Indi_RSI(_indi_rsi_params), INDI_RSI);
+
+    IndiPatternParams _indi_pattern_params(::Rider_Indi_Pattern_Shift);
+    _indi_pattern_params.SetTf(Get<ENUM_TIMEFRAMES>(STRAT_PARAM_TF));
+    SetIndicator(new Indi_Pattern(_indi_pattern_params), INDI_PATTERN);
+
+    IndiVolumesParams _indi_volumes_params(VOLUME_TICK, ::Rider_Indi_Volumes_Shift);
+    _indi_volumes_params.SetTf(Get<ENUM_TIMEFRAMES>(STRAT_PARAM_TF));
+    SetIndicator(new Indi_Volumes(_indi_volumes_params), INDI_VOLUMES);
 
     DictStruct<long, Ref<Order>> _orders_active = strade.GetOrdersActive();
     _orders_active.Clear();
@@ -188,6 +200,11 @@ class Stg_Rider : public Strategy {
     Strategy::OnOrderOpen(_oparams);
     // trade.orders_active.Set(_order.Get<ulong>(ORDER_PROP_TICKET), _ref_order);
     // @todo: We need OnOrderOpen after order is opened.
+    strade.UpdateStates();
+    if (strade.Get<bool>(TRADE_STATE_ORDERS_ACTIVE)) {
+      // @todo: To be moved after order is opened (EA31337-classes/issues/782).
+      pricestop_value = CalcPriceStop();
+    }
   }
 
   /**
@@ -248,8 +265,12 @@ class Stg_Rider : public Strategy {
    */
   virtual float PriceStop(ENUM_ORDER_TYPE _cmd, ENUM_ORDER_TYPE_VALUE _mode, int _method = 0, float _level = 0.0f,
                           short _bars = 4) {
-    // return Strategy::PriceStop(_cmd, _mode, _method, _level, _bars);
-    return trade.CheckCondition(TRADE_COND_ACCOUNT, ACCOUNT_COND_EQUITY_IN_PROFIT) ? pricestop_value : 0.0f;
+    // @todo: Do individual lock-ins (EA31337/EA31337-classes/issues/782).
+    float _trade_dist = trade.GetTradeDistanceInValue();
+    int _direction = Order::OrderDirection(_cmd, _mode);
+    return trade.CheckCondition(TRADE_COND_ACCOUNT, ACCOUNT_COND_EQUITY_IN_PROFIT)
+               ? (float)Math::ChangeByPct(fabs(pricestop_value), _level * _direction)
+               : 0.0f;
   }
 
   /**
@@ -268,24 +289,45 @@ class Stg_Rider : public Strategy {
    * Check strategy's opening signal.
    */
   bool SignalOpen(ENUM_ORDER_TYPE _cmd, int _method, float _level = 0.0f, int _shift = 0) {
-    Indi_RSI *_indi = GetIndicator();
+    int _ishift_pattern = ::Rider_Indi_Pattern_Shift;  // @todo: Read from getters.
+    int _ishift_rsi = ::Rider_Indi_RSI_Shift;          // @todo: Read from getters.
+    int _ishift_volumes = ::Rider_Indi_Volumes_Shift;  // @todo: Read from getters.
+    Indi_Pattern *_indi_pattern = GetIndicator(INDI_PATTERN);
+    Indi_RSI *_indi_rsi = GetIndicator(INDI_RSI);
+    Indi_Volumes *_indi_volumes = GetIndicator(INDI_VOLUMES);
     bool _result =
-        _indi.GetFlag(INDI_ENTRY_FLAG_IS_VALID, _shift) && _indi.GetFlag(INDI_ENTRY_FLAG_IS_VALID, _shift + 1);
+        _indi_rsi.GetFlag(INDI_ENTRY_FLAG_IS_VALID, _shift) && _indi_rsi.GetFlag(INDI_ENTRY_FLAG_IS_VALID, _shift + 1);
+    _result &= _indi_pattern.GetFlag(INDI_ENTRY_FLAG_IS_VALID, 1) && _indi_rsi.GetFlag(INDI_ENTRY_FLAG_IS_VALID, 1);
     if (!_result) {
       // Returns false when indicator data is not valid.
       return false;
     }
-    IndicatorSignal _signals = _indi.GetSignals(4, _shift);
+    IndicatorDataEntry _indi_pattern_entry = _indi_pattern[_ishift_pattern];
+    // _result &= _indi_volumes.IsIncreasing(1, 0, _ishift_volumes);
+    // Workaround for the above.
+    Chart *_chart_volumes = (Chart *)_indi_volumes;
+    _result &= (long)_chart_volumes.GetVolume() >
+               (long)_chart_volumes.GetLastVolume();  // @fixme: Find a better way than casting to avoid sign mismatch.
     switch (_cmd) {
       case ORDER_TYPE_BUY:
         // Buy signal.
-        _result &= _indi.IsDecreasing(1, 0, _shift);
+        if (_method == 1) _result &= _indi_rsi.IsDecreasing(1, 0, _ishift_rsi);
+        if (_method > 1) {
+          // @todo: Convert to neutral opposite/patterns (EA31337/EA31337-classes/issues/785).
+          // This checks if a particular pattern (determined by _method) is set based on method input param.
+          _result &= (_indi_pattern_entry.GetValue<int>(fmin(4, _method / 32)) & (1 << (_method % 32))) != 0;
+        }
         // _result &= _indi.IsIncByPct(_level / 10, 0, _shift, 2);
         // _result &= _method > 0 ? _signals.CheckSignals(_method) : _signals.CheckSignalsAll(-_method);
         break;
       case ORDER_TYPE_SELL:
         // Sell signal.
-        _result &= _indi.IsIncreasing(1, 0, _shift);
+        if (_method == 1) _result &= _indi_rsi.IsIncreasing(1, 0, _ishift_rsi);
+        if (_method > 1) {
+          // @todo: Convert to neutral opposite/patterns (EA31337/EA31337-classes/issues/785).
+          // This checks if a particular pattern (determined by _method) is set based on method input param.
+          _result &= (_indi_pattern_entry.GetValue<int>(fmin(4, _method / 32)) & (1 << (_method % 32))) != 0;
+        }
         // _result &= _indi.IsDecByPct(_level / 10, 0, _shift, 2);
         // _result &= _method > 0 ? _signals.CheckSignals(_method) : _signals.CheckSignalsAll(-_method);
         break;
@@ -330,7 +372,7 @@ class Stg_Rider : public Strategy {
       float _range = _bar1.bar.ohlc.GetRange();
       if (_range > 0) {
         float _pp, _r1, _r2, _r3, _r4, _s1, _s2, _s3, _s4;
-        float _close = (float)_c.GetClose(_tf);  // @todo: Transfer fix to classes.
+        float _close = (float)_c.GetClose(_tf);  // @todo: Transfer fix to classes (fix is part of v3.002-dev-new).
         // float _pp = _bar1.bar.ohlc.GetPivot();
         _bar1.bar.ohlc.GetPivots(::Rider_Trend_Pivot_Type, _pp, _r1, _r2, _r3, _r4, _s1, _s2, _s3, _s4);
         _result = 1 / _range * (_close - _pp);
