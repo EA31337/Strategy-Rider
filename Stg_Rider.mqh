@@ -8,7 +8,7 @@ INPUT_GROUP("Rider strategy: strategy params");
 INPUT float Rider_LotSize = 0;                 // Lot size
 INPUT int Rider_SignalOpenMethod = 0;          // Signal open method
 INPUT float Rider_SignalOpenLevel = 0;         // Signal open level
-INPUT int Rider_SignalOpenFilterMethod = 160;  // Signal open filter method
+INPUT int Rider_SignalOpenFilterMethod = 322;  // Signal open filter method
 INPUT int Rider_SignalOpenFilterTime = 3;      // Signal open filter time (0-31)
 INPUT int Rider_SignalOpenBoostMethod = 0;     // Signal open boost method
 INPUT int Rider_SignalCloseMethod = 0;         // Signal close method
@@ -21,11 +21,11 @@ INPUT float Rider_MaxSpread = 4.0;             // Max spread to trade (in pips)
 INPUT short Rider_Shift = 0;                   // Shift
 INPUT float Rider_OrderCloseLoss = 80;         // Order close loss
 INPUT float Rider_OrderCloseProfit = 0;        // Order close profit
-INPUT int Rider_OrderCloseTime = -10;          // Order close time in mins (>0) or bars (<0)
+INPUT int Rider_OrderCloseTime = 0;            // Order close time in mins (>0) or bars (<0)
 INPUT_GROUP("Rider strategy: Rider custom params");
-INPUT ENUM_PP_TYPE Rider_Trend_Pivot_Type = PP_WOODIE;  // Pivot type for trend calculation
-INPUT ENUM_TIMEFRAMES Rider_Trend_Tf = PERIOD_H1;       // Trend timeframe calculation
-INPUT float Rider_Trend_Threshold = 0.1f;               // Trend treshold
+INPUT ENUM_PP_TYPE Rider_Trend_Pivot_Type = PP_TOM_DEMARK;  // Pivot type for trend calculation
+INPUT ENUM_TIMEFRAMES Rider_Trend_Tf = PERIOD_M30;          // Trend timeframe calculation
+INPUT float Rider_Trend_Threshold = 0.3f;                   // Trend treshold
 INPUT_GROUP("Rider strategy: Rider indicator params");
 INPUT int Rider_Indi_RSI_Period = 16;                                    // Period
 INPUT ENUM_APPLIED_PRICE Rider_Indi_RSI_Applied_Price = PRICE_WEIGHTED;  // Applied Price
@@ -79,7 +79,8 @@ class Stg_Rider : public Strategy {
    */
   float CalcPriceStop() {
     double balance = trade.account.GetBalance();
-    double equity = trade.account.GetEquity();  // Or use balance as starting point
+    double equity = trade.account.GetEquity();
+    double floating_pnl = equity - balance;  // Positive if in profit
     double totalBuyLots = 0.0, totalSellLots = 0.0;
     double buyOpenSum = 0.0, sellOpenSum = 0.0;
     string symbol = trade.GetChart().GetSymbol();
@@ -129,11 +130,20 @@ class Stg_Rider : public Strategy {
     double A = tickValue / tickSize * lotsDiff;
     double B = tickValue / tickSize * (buyAvgOpen * totalBuyLots - sellAvgOpen * totalSellLots);
 
-    if (MathAbs(A) > 1e-8) {
-      // _pricestop_value = (float)(( -balance + B ) / A);
-      _pricestop_value = (float)(buyAvgOpen - balance / ((tickValue / tickSize) * totalBuyLots));
+    // Determine price based on relationship between equity and balance
+    if (totalBuyLots > 0 && totalSellLots == 0) {
+      // Only BUY positions
+      double price_change = floating_pnl / ((tickValue / tickSize) * totalBuyLots);
+      _pricestop_value = (float)(buyAvgOpen - price_change);
+    } else if (totalSellLots > 0 && totalBuyLots == 0) {
+      // Only SELL positions
+      double price_change = floating_pnl / ((tickValue / tickSize) * totalSellLots);
+      _pricestop_value = (float)(sellAvgOpen + price_change);
+    } else if (MathAbs(A) > 1e-8) {
+      // Mixed positions
+      _pricestop_value = (float)(buyAvgOpen - floating_pnl / A);
     } else {
-      _pricestop_value = 0.0f;  // Flat or no positions
+      _pricestop_value = 0.0f;
     }
 
     return _pricestop_value;
@@ -197,6 +207,7 @@ class Stg_Rider : public Strategy {
     }
     if ((_periods & DATETIME_HOUR) != 0) {
       // New hour started.
+      Suspended(false);
     }
     if ((_periods & DATETIME_DAY) != 0) {
       // New day started.
@@ -238,7 +249,7 @@ class Stg_Rider : public Strategy {
   virtual float PriceStop(ENUM_ORDER_TYPE _cmd, ENUM_ORDER_TYPE_VALUE _mode, int _method = 0, float _level = 0.0f,
                           short _bars = 4) {
     // return Strategy::PriceStop(_cmd, _mode, _method, _level, _bars);
-    return pricestop_value;
+    return trade.CheckCondition(TRADE_COND_ACCOUNT, ACCOUNT_COND_EQUITY_IN_PROFIT) ? pricestop_value : 0.0f;
   }
 
   /**
@@ -290,10 +301,13 @@ class Stg_Rider : public Strategy {
     if (_method != 0) {
       _result = Strategy::SignalOpenFilterMethod(_cmd, _method);
       _result &= IsTrend(_cmd, ::Rider_Trend_Tf, Get<ENUM_STRATEGY_PARAM>(STRAT_PARAM_SHIFT));
-      if (METHOD(_method, 7))
+      if (METHOD(_method, 7)) {
         _result &= !trade.HasActiveOrders() ||
                    !trade.CheckCondition(TRADE_COND_ACCOUNT, _method > 0 ? ACCOUNT_COND_EQUITY_IN_PROFIT
                                                                          : ACCOUNT_COND_EQUITY_IN_LOSS);  // 128
+      }
+      if (METHOD(_method, 8))
+        _result &= !strade.HasBarOrder(_cmd);  // 256, @todo: This should be part of main SOFM (trade.HasBarOrder).
     }
     return _result;
   }
