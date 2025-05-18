@@ -27,11 +27,11 @@ INPUT ENUM_PP_TYPE Rider_Trend_Pivot_Type = PP_TOM_DEMARK;  // Pivot type for tr
 INPUT ENUM_TIMEFRAMES Rider_Trend_Tf = PERIOD_M15;          // Trend timeframe calculation
 INPUT float Rider_Trend_Threshold = 0.3f;                   // Trend treshold
 INPUT_GROUP("Rider strategy: Pattern indicator params");
-INPUT int Rider_Indi_Pattern_Shift = 1;  // Shift
+INPUT int Rider_Indi_Pattern_Shift = 1;  // Shift (used only for SOM>1)
 INPUT_GROUP("Rider strategy: RSI indicator params");
 INPUT int Rider_Indi_RSI_Period = 16;                                    // Period
 INPUT ENUM_APPLIED_PRICE Rider_Indi_RSI_Applied_Price = PRICE_WEIGHTED;  // Applied Price
-INPUT int Rider_Indi_RSI_Shift = 0;                                      // Shift
+INPUT int Rider_Indi_RSI_Shift = 0;                                      // Shift (used only for SOM=1)
 INPUT_GROUP("Rider strategy: Volumes indicator params");
 INPUT int Rider_Indi_Volumes_Shift = 1;  // Shift
 
@@ -295,9 +295,10 @@ class Stg_Rider : public Strategy {
     Indi_Pattern *_indi_pattern = GetIndicator(INDI_PATTERN);
     Indi_RSI *_indi_rsi = GetIndicator(INDI_RSI);
     Indi_Volumes *_indi_volumes = GetIndicator(INDI_VOLUMES);
-    bool _result =
-        _indi_rsi.GetFlag(INDI_ENTRY_FLAG_IS_VALID, _shift) && _indi_rsi.GetFlag(INDI_ENTRY_FLAG_IS_VALID, _shift + 1);
-    _result &= _indi_pattern.GetFlag(INDI_ENTRY_FLAG_IS_VALID, 1) && _indi_rsi.GetFlag(INDI_ENTRY_FLAG_IS_VALID, 1);
+    bool _result = _indi_rsi.GetFlag(INDI_ENTRY_FLAG_IS_VALID, _ishift_rsi) &&
+                   _indi_rsi.GetFlag(INDI_ENTRY_FLAG_IS_VALID, _ishift_rsi + 1);
+    _result &= _indi_pattern.GetFlag(INDI_ENTRY_FLAG_IS_VALID, _indi_pattern) &&
+               _indi_pattern.GetFlag(INDI_ENTRY_FLAG_IS_VALID, _indi_pattern + 1);
     if (!_result) {
       // Returns false when indicator data is not valid.
       return false;
@@ -311,7 +312,7 @@ class Stg_Rider : public Strategy {
     switch (_cmd) {
       case ORDER_TYPE_BUY:
         // Buy signal.
-        if (_method == 1) _result &= _indi_rsi.IsDecreasing(1, 0, _ishift_rsi);
+        if (_method == 1) _result &= _indi_rsi.IsDecreasing(1, 0);
         if (_method > 1) {
           // @todo: Convert to neutral opposite/patterns (EA31337/EA31337-classes/issues/785).
           // This checks if a particular pattern (determined by _method) is set based on method input param.
@@ -322,7 +323,7 @@ class Stg_Rider : public Strategy {
         break;
       case ORDER_TYPE_SELL:
         // Sell signal.
-        if (_method == 1) _result &= _indi_rsi.IsIncreasing(1, 0, _ishift_rsi);
+        if (_method == 1) _result &= _indi_rsi.IsIncreasing(1, 0);
         if (_method > 1) {
           // @todo: Convert to neutral opposite/patterns (EA31337/EA31337-classes/issues/785).
           // This checks if a particular pattern (determined by _method) is set based on method input param.
